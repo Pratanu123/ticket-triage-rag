@@ -28,7 +28,17 @@ cp .env.example .env
 docker compose up --build
 ```
 
-No API keys. On first run the `ollama-pull` service downloads `llama3.1:8b` and `nomic-embed-text` into a named volume (~5–10 minutes depending on network). Later starts reuse that volume. API listens on `http://localhost:8000`.
+No API keys. On first run the `ollama-pull` service downloads `llama3.1:8b` and `nomic-embed-text` into a named volume (~5–10 minutes depending on network). Later starts reuse that volume.
+
+| Surface | URL |
+|---------|-----|
+| Dashboard UI | http://localhost:3000 |
+| API | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
+
+The UI proxies `/api/*` to the FastAPI service through nginx, so the browser never talks to the backend origin directly (no CORS setup).
+
+> Screenshot: add a dashboard capture here after a local run (ticket list with confidence bars + status badges, and a detail view with override).
 
 ## Example usage
 
@@ -176,6 +186,7 @@ Seed docs are split primarily on `##` / `###` headings, then hard-capped around 
 ## Tech stack
 
 - **API:** Python 3.11, FastAPI, Pydantic, SQLAlchemy (async)
+- **UI:** React + Vite + Tailwind (nginx in Compose)
 - **LLM / embeddings:** Ollama (`llama3.1:8b`, `nomic-embed-text`) via LangChain
 - **Vector store:** ChromaDB (Docker volume)
 - **Database:** PostgreSQL 16

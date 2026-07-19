@@ -124,6 +124,17 @@ services:
       start_period: 40s
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Run with: docker compose run --rm test
   # (or: docker compose run --rm api pytest -v)
   test:
