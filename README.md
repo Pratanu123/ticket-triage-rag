@@ -72,6 +72,7 @@ app/
     respond.py         # draft reply if confident, else escalate
     llm.py             # shared ChatOllama client
   models/              # SQLAlchemy + Pydantic schemas
+tests/                 # pytest suite (retrieval, classify, escalate, API)
 scripts/
   pull_ollama_models.sh
 ```
@@ -108,6 +109,30 @@ docker compose run --rm ollama-pull
 ```
 
 API: `http://localhost:8000` · Docs: `http://localhost:8000/docs` · Ollama: `http://localhost:11434`
+
+## Running tests
+
+Tests run **inside the same Compose network** as the app (real Postgres, ChromaDB,
+and local Ollama). Start the stack once, then:
+
+```bash
+docker compose run --rm api pytest -v
+```
+
+Equivalent one-shot service (same command, `test` profile):
+
+```bash
+docker compose --profile test run --rm test
+```
+
+Notes:
+
+- Classification tests (`@pytest.mark.llm`) hit the real `llama3.1:8b` model —
+  keep that set small on purpose.
+- Retrieval tests hit real `nomic-embed-text` + Chroma.
+- API/escalation unit paths stub LLM calls where the behavior under test is
+  routing/persistence, not model quality.
+- First run needs models pulled and the KB indexed (`docker compose up` once).
 
 ## Example requests
 
