@@ -36,4 +36,5 @@ class HealthResponse(BaseModel):
     status: str
     postgres: str
     chromadb: str
+    ollama: str
     knowledge_base_docs: int
