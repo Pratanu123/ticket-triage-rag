@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agent.classify import ClassificationResult
 from app.agent.llm import get_chat_model
 from app.config import Settings, get_settings
+from app.metrics import observe_respond_duration
 from app.models.db import TicketStatus
 from app.rag.retrieve import format_context
 
@@ -83,12 +85,20 @@ RETRIEVED KNOWLEDGE BASE CONTEXT:
 
 Write the customer-facing reply now. Cite source filenames from the context."""
 
-    llm = get_chat_model(settings, json_mode=False)
-    response = await llm.ainvoke(
-        [SystemMessage(content=RESPOND_SYSTEM), HumanMessage(content=user_prompt)]
-    )
-    text = response.content if isinstance(response.content, str) else str(response.content)
-    draft = text.strip() or None
+    started = time.perf_counter()
+    try:
+        llm = get_chat_model(settings, json_mode=False)
+        response = await llm.ainvoke(
+            [SystemMessage(content=RESPOND_SYSTEM), HumanMessage(content=user_prompt)]
+        )
+        text = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
+        draft = text.strip() or None
+    finally:
+        observe_respond_duration(time.perf_counter() - started)
 
     if not draft:
         return ResponseResult(

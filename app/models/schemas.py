@@ -40,6 +40,26 @@ class TicketListResponse(BaseModel):
     total: int
 
 
+class TicketSearchHit(BaseModel):
+    ticket_id: str
+    subject: str | None = None
+    body: str | None = None
+    category: str | None = None
+    confidence: float | None = None
+    status: str | None = None
+    reasoning: str | None = None
+    suggested_response: str | None = None
+    event: str | None = None
+    timestamp: str | None = None
+    score: float | None = None
+
+
+class TicketSearchResponse(BaseModel):
+    query: str
+    total: int
+    hits: list[TicketSearchHit]
+
+
 class TicketOverrideRequest(BaseModel):
     """Human-in-the-loop: approve or edit a draft response for an escalated ticket."""
 

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent.llm import get_chat_model
 from app.config import Settings, get_settings
+from app.metrics import observe_classify_duration
 from app.models.db import TicketCategory
 from app.rag.retrieve import RetrievedChunk, format_context, retrieve
 
@@ -128,43 +130,47 @@ async def classify_ticket(
     Retries the LLM once if the first response fails JSON/schema validation.
     """
     settings = settings or get_settings()
+    started = time.perf_counter()
     query = f"{subject}\n\n{body}"
     chunks = retrieve(query, settings=settings)
     context_block = format_context(chunks)
 
     last_error: str | None = None
-    for attempt in range(2):
-        raw = await _invoke_classifier(
-            subject,
-            body,
-            context_block,
-            settings=settings,
-            retry_hint=last_error if attempt == 1 else None,
-        )
-        try:
-            payload = _extract_json(raw)
-            category, confidence, reasoning = _parse_classification(payload)
-            return ClassificationResult(
-                category=category,
-                confidence=confidence,
-                reasoning=reasoning,
-                chunks=chunks,
+    try:
+        for attempt in range(2):
+            raw = await _invoke_classifier(
+                subject,
+                body,
+                context_block,
+                settings=settings,
+                retry_hint=last_error if attempt == 1 else None,
             )
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
-            last_error = str(exc)
-            logger.warning(
-                "Classification parse failed (attempt %s): %s | raw=%r",
-                attempt + 1,
-                exc,
-                raw[:500],
-            )
+            try:
+                payload = _extract_json(raw)
+                category, confidence, reasoning = _parse_classification(payload)
+                return ClassificationResult(
+                    category=category,
+                    confidence=confidence,
+                    reasoning=reasoning,
+                    chunks=chunks,
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Classification parse failed (attempt %s): %s | raw=%r",
+                    attempt + 1,
+                    exc,
+                    raw[:500],
+                )
 
-    return ClassificationResult(
-        category=TicketCategory.general,
-        confidence=0.0,
-        reasoning=(
-            "Classifier returned unparseable output after retry; "
-            f"escalating for human review. Last error: {last_error}"
-        ),
-        chunks=chunks,
-    )
+        return ClassificationResult(
+            category=TicketCategory.general,
+            confidence=0.0,
+            reasoning=(
+                "Classifier returned unparseable output after retry; "
+                f"escalating for human review. Last error: {last_error}"
+            ),
+            chunks=chunks,
+        )
+    finally:
+        observe_classify_duration(time.perf_counter() - started)

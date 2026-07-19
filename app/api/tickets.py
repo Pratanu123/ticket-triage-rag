@@ -1,12 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.classify import classify_ticket
 from app.agent.respond import draft_or_escalate
 from app.database import get_db
+from app.metrics import record_ticket_outcome
 from app.models.db import Ticket, TicketStatus
 from app.models.schemas import (
     RetrievedChunkOut,
@@ -14,7 +15,10 @@ from app.models.schemas import (
     TicketListResponse,
     TicketOverrideRequest,
     TicketResponse,
+    TicketSearchHit,
+    TicketSearchResponse,
 )
+from app.search.opensearch import index_ticket, search_tickets
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
@@ -60,6 +64,9 @@ async def create_ticket(
     db.add(ticket)
     await db.commit()
     await db.refresh(ticket)
+
+    record_ticket_outcome(ticket.status.value)
+    index_ticket(ticket, event="created")
     return _ticket_to_response(ticket)
 
 
@@ -73,6 +80,37 @@ async def list_tickets(db: AsyncSession = Depends(get_db)) -> TicketListResponse
         tickets=[_ticket_to_response(t) for t in rows],
         total=int(total),
     )
+
+
+@router.get("/search", response_model=TicketSearchResponse)
+async def search_ticket_history(
+    q: str = Query("", description="Full-text query over ticket audit history"),
+    size: int = Query(20, ge=1, le=100),
+) -> TicketSearchResponse:
+    """
+    Full-text search over ticket history in OpenSearch.
+
+    Distinct from RAG retrieval (`/debug/retrieve`), which searches the
+    knowledge base — this searches classified tickets / audit docs.
+    """
+    raw_hits = search_tickets(q, size=size)
+    hits = [
+        TicketSearchHit(
+            ticket_id=str(h.get("ticket_id", "")),
+            subject=h.get("subject"),
+            body=h.get("body"),
+            category=h.get("category"),
+            confidence=h.get("confidence"),
+            status=h.get("status"),
+            reasoning=h.get("reasoning"),
+            suggested_response=h.get("suggested_response"),
+            event=h.get("event"),
+            timestamp=h.get("timestamp"),
+            score=h.get("_score"),
+        )
+        for h in raw_hits
+    ]
+    return TicketSearchResponse(query=q, total=len(hits), hits=hits)
 
 
 @router.get("/{ticket_id}", response_model=TicketResponse)
@@ -116,4 +154,7 @@ async def override_ticket(
 
     await db.commit()
     await db.refresh(ticket)
+
+    record_ticket_outcome(ticket.status.value)
+    index_ticket(ticket, event="overridden")
     return _ticket_to_response(ticket)

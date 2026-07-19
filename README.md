@@ -32,13 +32,39 @@ No API keys. On first run the `ollama-pull` service downloads `llama3.1:8b` and 
 
 | Surface | URL |
 |---------|-----|
-| Dashboard UI | http://localhost:3000 |
+| Dashboard UI | http://localhost:8080 |
 | API | http://localhost:8000 |
 | API docs | http://localhost:8000/docs |
+| Grafana | http://localhost:3000 |
+| pgAdmin | http://localhost:5050 |
+| OpenSearch Dashboards | http://localhost:5601 |
 
 The UI proxies `/api/*` to the FastAPI service through nginx, so the browser never talks to the backend origin directly (no CORS setup).
 
 > Screenshot: add a dashboard capture here after a local run (ticket list with confidence bars + status badges, and a detail view with override).
+
+## Observability & Admin Tools
+
+| Tool | Port | Purpose |
+|------|------|---------|
+| **pgAdmin** | http://localhost:5050 | Inspect raw Postgres data (`tickets` table, enums, history). Login with `PGADMIN_EMAIL` / `PGADMIN_PASSWORD` from `.env`. The Postgres server is pre-loaded via `servers.json`. |
+| **OpenSearch Dashboards** | http://localhost:5601 | Search and audit ticket history indexed on create/override. Separate from RAG retrieval (which searches the knowledge base). |
+| **Grafana** | http://localhost:3000 | System metrics: request latency, LLM classify/respond duration, auto-resolved vs escalated outcomes. Login with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`. Dashboard **Ticket Triage Overview** is provisioned automatically. |
+| **Prometheus** | http://localhost:9090 | Scrapes FastAPI `/metrics`. |
+
+OpenSearch is tuned for a laptop (`OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m`, single-node, security plugin disabled). On lower-memory machines, stop Ollama when you are not actively testing triage:
+
+```bash
+docker compose stop ollama
+```
+
+That frees several GB of RAM for OpenSearch/Grafana while you still browse pgAdmin, search, and dashboards.
+
+Ticket audit search API (OpenSearch-backed):
+
+```bash
+curl -s 'http://localhost:8000/tickets/search?q=2FA' | jq
+```
 
 ## Example usage
 
@@ -186,10 +212,12 @@ Seed docs are split primarily on `##` / `###` headings, then hard-capped around 
 ## Tech stack
 
 - **API:** Python 3.11, FastAPI, Pydantic, SQLAlchemy (async)
-- **UI:** React + Vite + Tailwind (nginx in Compose)
+- **UI:** React + Vite + Tailwind (nginx in Compose, `:8080`)
 - **LLM / embeddings:** Ollama (`llama3.1:8b`, `nomic-embed-text`) via LangChain
 - **Vector store:** ChromaDB (Docker volume)
-- **Database:** PostgreSQL 16
+- **Ticket search / audit:** OpenSearch + Dashboards
+- **Database:** PostgreSQL 16 (+ pgAdmin)
+- **Metrics:** Prometheus + Grafana (`prometheus-fastapi-instrumentator`)
 - **Orchestration:** Docker Compose
 - **Tests:** pytest (run inside Compose against real services)
 

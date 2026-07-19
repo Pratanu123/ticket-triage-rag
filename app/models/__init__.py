@@ -5,6 +5,7 @@ from app.models.schemas import (
     TicketListResponse,
     TicketOverrideRequest,
     TicketResponse,
+    TicketSearchResponse,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "TicketListResponse",
     "TicketOverrideRequest",
     "TicketResponse",
+    "TicketSearchResponse",
 ]

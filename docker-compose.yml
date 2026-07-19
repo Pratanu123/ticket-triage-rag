@@ -53,7 +53,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # One-shot: pull chat + embedding models on first run (persisted in ollama_data).
   ollama-pull:
     image: ollama/ollama
     environment:
@@ -68,8 +67,6 @@ services:
         condition: service_started
     restart: "no"
 
-  # One-shot: chunk + embed seed_data into Chroma via Ollama nomic-embed-text.
-  # Re-run with: docker compose run --rm embed python -m app.rag.embed --force
   embed:
     build:
       context: .
@@ -90,6 +87,48 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  opensearch:
+    image: opensearchproject/opensearch:2.18.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:9200/_cluster/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.18.0
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -107,6 +146,8 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,6 +157,8 @@ services:
         condition: service_completed_successfully
       embed:
         condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -129,14 +172,72 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:80"
+      - "8080:80"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
 
-  # Run with: docker compose run --rm test
-  # (or: docker compose run --rm api pytest -v)
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /config/pgpass /pgpass
+        chmod 600 /pgpass
+        chown 5050:0 /pgpass
+        cp /config/servers.json /pgadmin4/servers.json
+        exec /entrypoint.sh
+    volumes:
+      - ./observability/pgadmin/servers.json:/config/servers.json:ro
+      - ./observability/pgadmin/pgpass:/config/pgpass:ro
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
   test:
     build:
       context: .
@@ -152,6 +253,8 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
     command: ["pytest", "-v", "--tb=short"]
     depends_on:
       postgres:
@@ -162,6 +265,8 @@ services:
         condition: service_completed_successfully
       embed:
         condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
     restart: "no"
     profiles:
       - test
@@ -170,3 +275,7 @@ volumes:
   postgres_data:
   chroma_data:
   ollama_data:
+  opensearch_data:
+  pgadmin_data:
+  prometheus_data:
+  grafana_data:

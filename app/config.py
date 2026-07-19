@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     chroma_port: int = 8000
     chroma_collection: str = "support_kb"
 
+    opensearch_host: str = "opensearch"
+    opensearch_port: int = 9200
+
     seed_data_path: str = _DEFAULT_SEED
     knowledge_base_path: str = _DEFAULT_SEED
 
