@@ -17,19 +17,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
-    if not settings.openai_api_key:
-        logger.warning(
-            "OPENAI_API_KEY is empty — local Chroma embeddings are used for "
-            "retrieval; LLM triage will fail until a key is set"
-        )
-
     logger.info("Initializing database schema…")
     await init_db()
-    # Knowledge-base indexing is handled by the one-shot `embed` Compose service
-    # (service_completed_successfully) before this API starts.
+    # KB indexing is handled by the one-shot `embed` Compose service before boot.
     logger.info(
-        "API ready (seed_data=%s, collection=%s)",
-        settings.seed_data_path,
+        "API ready (ollama=%s model=%s embed=%s collection=%s)",
+        settings.ollama_base_url,
+        settings.ollama_model,
+        settings.ollama_embed_model,
         settings.chroma_collection,
     )
     yield
@@ -38,10 +33,10 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="CloudNova Ticket Triage",
     description=(
-        "RAG-powered support ticket triage. Stage 2: knowledge-base embedding "
-        "and retrieval (use POST /debug/retrieve to inspect chunks)."
+        "Fully self-hosted RAG ticket triage using local Ollama "
+        "(llama3.1:8b + nomic-embed-text). No external API keys."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 
 from app.config import Settings, get_settings
 from app.models.db import TicketCategory, TicketStatus
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 VALID_CATEGORIES = {c.value for c in TicketCategory}
 
-CLASSIFY_SYSTEM = """You are a support ticket triage assistant for CloudLedger, a fictional SaaS
-product for expense tracking and invoicing.
+CLASSIFY_SYSTEM = """You are a support ticket triage assistant for CloudNova, a fictional SaaS
+product for project tracking and team collaboration.
 
 Given a support ticket and retrieved knowledge-base excerpts, you must:
 1. Classify the ticket into exactly one category:
@@ -37,6 +37,7 @@ Rules:
 - Return STRICT JSON with keys:
   category, confidence, reasoning, suggested_response
 - suggested_response must be a string (empty string when not drafting a reply).
+- Do not wrap the JSON in markdown code fences.
 """
 
 
@@ -50,22 +51,23 @@ class TriageResult:
     retrieved_context: str | None
 
 
-def get_chat_model(settings: Settings | None = None) -> ChatOpenAI:
+def get_chat_model(settings: Settings | None = None) -> ChatOllama:
+    """Local Ollama chat model (llama3.1:8b by default)."""
     settings = settings or get_settings()
-    if settings.llm_provider != "openai":
-        raise ValueError(
-            f"Unsupported LLM_PROVIDER={settings.llm_provider!r}. "
-            "Currently only 'openai' is implemented."
-        )
-    return ChatOpenAI(
-        model=settings.llm_model,
-        api_key=settings.openai_api_key,
+    return ChatOllama(
+        model=settings.ollama_model,
+        base_url=settings.ollama_base_url,
         temperature=0,
+        format="json",
     )
 
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
+    # Strip optional markdown fences some models still emit
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -140,7 +142,6 @@ Respond with JSON only."""
         status = TicketStatus.auto_resolved
     else:
         status = TicketStatus.needs_human_review
-        # Do not surface a half-baked reply when escalating
         if confidence < settings.confidence_threshold:
             suggested = None
 

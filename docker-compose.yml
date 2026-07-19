@@ -39,9 +39,37 @@ services:
       start_period: 15s
     restart: unless-stopped
 
-  # One-shot job: chunk + embed seed_data into Chroma before the API serves traffic.
-  # Idempotent (deterministic upsert IDs). Re-run with:
-  #   docker compose run --rm embed python -m app.rag.embed --force
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot: pull chat + embedding models on first run (persisted in ollama_data).
+  ollama-pull:
+    image: ollama/ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+    volumes:
+      - ./scripts/pull_ollama_models.sh:/pull_ollama_models.sh:ro
+    entrypoint: ["/bin/sh", "/pull_ollama_models.sh"]
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: "no"
+
+  # One-shot: chunk + embed seed_data into Chroma via Ollama nomic-embed-text.
+  # Re-run with: docker compose run --rm embed python -m app.rag.embed --force
   embed:
     build:
       context: .
@@ -52,11 +80,14 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
       SEED_DATA_PATH: /app/app/rag/seed_data
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
     command: ["python", "-m", "app.rag.embed"]
     depends_on:
       chromadb:
         condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
     restart: "no"
 
   api:
@@ -73,14 +104,16 @@ services:
       CHROMA_PORT: 8000
       CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.7}
       SEED_DATA_PATH: /app/app/rag/seed_data
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
     depends_on:
       postgres:
         condition: service_healthy
       chromadb:
         condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
       embed:
         condition: service_completed_successfully
     healthcheck:
@@ -94,3 +127,4 @@ services:
 volumes:
   postgres_data:
   chroma_data:
+  ollama_data:

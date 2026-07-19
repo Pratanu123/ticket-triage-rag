@@ -1,11 +1,11 @@
-"""Load seed markdown, chunk, embed, and upsert into ChromaDB.
+"""Load seed markdown, chunk, embed via Ollama, and upsert into ChromaDB.
 
 Idempotent: chunk IDs are deterministic (`{source}::{chunk_index}`), so re-runs
 upsert the same records instead of duplicating them.
 
 Usage:
     python -m app.rag.embed
-    python -m app.rag.embed --force   # delete collection first, then re-index
+    python -m app.rag.embed --force
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ import time
 from pathlib import Path
 
 import chromadb
+import httpx
 from chromadb.api.models.Collection import Collection
-from chromadb.utils import embedding_functions
+from langchain_ollama import OllamaEmbeddings
 
 from app.config import Settings, get_settings
 
@@ -45,23 +46,18 @@ def get_chroma_client(settings: Settings | None = None) -> chromadb.HttpClient:
     return chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
 
 
-def get_embedding_function(settings: Settings | None = None):
-    """OpenAI when a key is set; otherwise Chroma's local default (onnx)."""
+def get_embeddings(settings: Settings | None = None) -> OllamaEmbeddings:
+    """Ollama embeddings (nomic-embed-text by default)."""
     settings = settings or get_settings()
-    if settings.openai_api_key:
-        logger.info(
-            "Using OpenAI embeddings model=%s", settings.embedding_model
-        )
-        return embedding_functions.OpenAIEmbeddingFunction(
-            api_key=settings.openai_api_key,
-            model_name=settings.embedding_model,
-        )
-
-    logger.warning(
-        "OPENAI_API_KEY not set — using Chroma DefaultEmbeddingFunction "
-        "(local) so indexing still works for retrieval testing"
+    logger.info(
+        "Using Ollama embeddings model=%s base_url=%s",
+        settings.ollama_embed_model,
+        settings.ollama_base_url,
     )
-    return embedding_functions.DefaultEmbeddingFunction()
+    return OllamaEmbeddings(
+        model=settings.ollama_embed_model,
+        base_url=settings.ollama_base_url,
+    )
 
 
 def wait_for_chroma(settings: Settings | None = None, attempts: int = 40) -> None:
@@ -83,6 +79,47 @@ def wait_for_chroma(settings: Settings | None = None, attempts: int = 40) -> Non
     ) from last_error
 
 
+def wait_for_ollama(settings: Settings | None = None, attempts: int = 60) -> None:
+    """Block until Ollama serves the configured embedding model."""
+    settings = settings or get_settings()
+    url = f"{settings.ollama_base_url.rstrip('/')}/api/tags"
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = httpx.get(url, timeout=5.0)
+            resp.raise_for_status()
+            names = {m.get("name", "") for m in resp.json().get("models", [])}
+            # Ollama may report "nomic-embed-text:latest"
+            ready = any(
+                n == settings.ollama_embed_model
+                or n.startswith(f"{settings.ollama_embed_model}:")
+                for n in names
+            )
+            if ready:
+                logger.info(
+                    "Ollama ready with embed model %s (attempt %s)",
+                    settings.ollama_embed_model,
+                    attempt,
+                )
+                return
+            logger.warning(
+                "Ollama up but %s not pulled yet (%s/%s); models=%s",
+                settings.ollama_embed_model,
+                attempt,
+                attempts,
+                sorted(names),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.warning(
+                "Waiting for Ollama (%s/%s): %s", attempt, attempts, exc
+            )
+        time.sleep(3)
+    raise RuntimeError(
+        f"Ollama embed model {settings.ollama_embed_model!r} not ready"
+    ) from last_error
+
+
 def _split_oversized(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     text = text.strip()
     if len(text) <= max_chars:
@@ -101,7 +138,6 @@ def _split_oversized(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
         if len(para) <= max_chars:
             buf = para
         else:
-            # Hard wrap very long paragraphs on sentence boundaries.
             sentences = re.split(r"(?<=[.!?])\s+", para)
             buf = ""
             for sentence in sentences:
@@ -126,7 +162,6 @@ def chunk_markdown(text: str, source: str, category: str) -> list[dict]:
     if not text:
         return []
 
-    # Keep the H1 with the first section; split subsequent H2/H3 blocks.
     sections = re.split(r"(?=\n## |\n### )", "\n" + text)
     sections = [s.strip() for s in sections if s.strip()]
     if not sections:
@@ -181,9 +216,9 @@ def get_or_create_collection(
     *,
     force: bool = False,
 ) -> Collection:
+    """Collection without a server-side embedding fn — we pass vectors explicitly."""
     settings = settings or get_settings()
     client = get_chroma_client(settings)
-    embedding_fn = get_embedding_function(settings)
 
     if force:
         try:
@@ -194,7 +229,6 @@ def get_or_create_collection(
 
     return client.get_or_create_collection(
         name=settings.chroma_collection,
-        embedding_function=embedding_fn,
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -209,21 +243,31 @@ def run_embedding_pipeline(
     *,
     force: bool = False,
 ) -> dict:
-    """Embed seed docs into ChromaDB. Safe to run repeatedly (upsert by id)."""
+    """Embed seed docs into ChromaDB via Ollama. Safe to re-run (upsert by id)."""
     settings = settings or get_settings()
     wait_for_chroma(settings)
+    wait_for_ollama(settings)
 
     chunks = load_seed_chunks(settings.seed_data_path)
     collection = get_or_create_collection(settings, force=force)
+    embedder = get_embeddings(settings)
 
-    # Upsert in batches to keep request sizes reasonable
-    batch_size = 32
+    batch_size = 16
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start : start + batch_size]
+        documents = [c["document"] for c in batch]
+        vectors = embedder.embed_documents(documents)
         collection.upsert(
             ids=[c["id"] for c in batch],
-            documents=[c["document"] for c in batch],
+            documents=documents,
+            embeddings=vectors,
             metadatas=[c["metadata"] for c in batch],
+        )
+        logger.info(
+            "Upserted batch %s–%s / %s",
+            start + 1,
+            min(start + batch_size, len(chunks)),
+            len(chunks),
         )
 
     total = collection.count()
@@ -238,6 +282,7 @@ def run_embedding_pipeline(
         "collection_count": total,
         "seed_docs": count_seed_docs(settings),
         "collection": settings.chroma_collection,
+        "embed_model": settings.ollama_embed_model,
     }
 
 

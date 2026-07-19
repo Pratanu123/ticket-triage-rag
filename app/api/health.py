@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,21 @@ async def health(db: AsyncSession = Depends(get_db)) -> HealthResponse:
         chroma_status = f"ok (heartbeat={heartbeat})"
     except Exception as exc:  # noqa: BLE001
         chroma_status = f"error: {exc}"
+
+    # Best-effort Ollama check (surfaced inside chromadb status string if degraded)
+    try:
+        resp = httpx.get(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=3.0
+        )
+        resp.raise_for_status()
+        models = [m.get("name", "") for m in resp.json().get("models", [])]
+        if not any(
+            m == settings.ollama_model or m.startswith(f"{settings.ollama_model}:")
+            for m in models
+        ):
+            chroma_status = f"{chroma_status}; ollama missing {settings.ollama_model}"
+    except Exception as exc:  # noqa: BLE001
+        chroma_status = f"{chroma_status}; ollama error: {exc}"
 
     overall = (
         "ok"

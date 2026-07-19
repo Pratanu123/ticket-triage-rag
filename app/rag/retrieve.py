@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from app.config import Settings, get_settings
-from app.rag.embed import get_or_create_collection
+from app.rag.embed import get_embeddings, get_or_create_collection
 
 
 @dataclass
@@ -27,7 +27,7 @@ def retrieve(
     settings: Settings | None = None,
 ) -> list[RetrievedChunk]:
     """
-    Embed `query` and return the top-k chunks with similarity scores.
+    Embed `query` with Ollama (nomic-embed-text) and return top-k chunks.
 
     Chroma returns cosine distances when the collection uses hnsw:space=cosine.
     We convert distance → similarity as `1 - distance` for easier reading.
@@ -38,8 +38,9 @@ def retrieve(
         return []
 
     collection = get_or_create_collection(settings)
+    query_vec = get_embeddings(settings).embed_query(query.strip())
     raw = collection.query(
-        query_texts=[query.strip()],
+        query_embeddings=[query_vec],
         n_results=top_k,
         include=["documents", "metadatas", "distances"],
     )
@@ -64,7 +65,6 @@ def retrieve(
     return chunks
 
 
-# Back-compat aliases used by the (existing) triage agent module
 retrieve_context = retrieve
 
 
