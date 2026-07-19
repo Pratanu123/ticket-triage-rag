@@ -17,21 +17,25 @@ when it should escalate. This project shows a safer pattern:
 2. Ask a local model to classify + score confidence against that context
 3. Auto-draft a reply only when confidence clears a threshold
 4. Otherwise mark the ticket `needs_human_review`
+5. A human can later approve/edit via `POST /tickets/{id}/override`
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  Client["Client / curl"] --> API["FastAPI"]
+  Client["Client / curl"] -->|POST /tickets| API["FastAPI"]
   Pull["ollama-pull\n(one-shot)"] -->|pull models| Ollama["Ollama"]
   EmbedJob["embed service\n(one-shot)"] -->|nomic-embed-text| Ollama
   EmbedJob -->|upsert chunks| Chroma["ChromaDB"]
   Seed["app/rag/seed_data/*.md"] --> EmbedJob
-  API -->|embed query| Ollama
-  API -->|top-k search| Chroma
-  API -->|classify JSON| Ollama
+  API -->|retrieve| Chroma
+  API -->|classify JSON| Classify["agent/classify.py"]
+  Classify --> Ollama
+  API -->|draft or escalate| Respond["agent/respond.py"]
+  Respond -->|confidence high| Ollama
   API --> PG["PostgreSQL"]
-```
+  Human["Human reviewer"] -->|POST /tickets/id/override| API
+
 
 | Service       | Role                                                      |
 |---------------|-----------------------------------------------------------|
@@ -58,12 +62,15 @@ break JSON more often. 8B is a deliberate reliability tradeoff for this demo.
 
 ```
 app/
-  api/                 # /health, /debug/retrieve, /tickets
+  api/                 # /health, /debug/retrieve, /tickets (+ override)
   rag/
     seed_data/         # 12 CloudNova support markdown docs
     embed.py           # chunk + Ollama embed + Chroma upsert
     retrieve.py        # top-k similarity search
-  agent/triage.py      # ChatOllama classification + drafting
+  agent/
+    classify.py        # RAG classify → category + confidence + reasoning
+    respond.py         # draft reply if confident, else escalate
+    llm.py             # shared ChatOllama client
   models/              # SQLAlchemy + Pydantic schemas
 scripts/
   pull_ollama_models.sh
@@ -120,31 +127,65 @@ curl -s -X POST http://localhost:8000/debug/retrieve \
 
 Expect top chunks from `login-2fa.md` (category `login`).
 
-### Create a ticket (RAG + local classification)
+### Create a ticket — high confidence (expect `auto_resolved`)
 
 ```bash
 curl -s -X POST http://localhost:8000/tickets \
   -H 'Content-Type: application/json' \
   -d '{
-    "subject": "Lost authenticator",
-    "body": "How do I reset my 2FA on CloudNova after getting a new phone?"
+    "subject": "I cannot log in",
+    "body": "I cannot log in, 2FA is not working after I got a new phone. How do I reset it?"
   }' | jq
 ```
+
+Expect: `category` = `login`, `confidence` ≥ `0.7`, `status` = `auto_resolved`,
+a `suggested_response` citing `login-2fa.md`, and `retrieved_chunks` from login docs.
+
+### Create a ticket — low confidence (expect escalation)
 
 ```bash
 curl -s -X POST http://localhost:8000/tickets \
   -H 'Content-Type: application/json' \
   -d '{
-    "subject": "Custom ERP connector",
-    "body": "Build a bi-directional SAP sync with 50ms latency SLA."
+    "subject": "Weird issue",
+    "body": "Something feels off with my workspace but I am not sure what. Also can you build a custom SAP connector with 50ms latency?"
   }' | jq
 ```
+
+Expect: `status` = `needs_human_review` and `suggested_response` = `null`
+(no guessing).
+
+### Fetch full ticket detail
+
+```bash
+curl -s http://localhost:8000/tickets/<ticket-uuid> | jq
+```
+
+Returns subject/body, category, confidence, status, draft response, reasoning,
+and the knowledge-base chunks used.
+
+### Human override (escalation is not a dead end)
+
+```bash
+curl -s -X POST http://localhost:8000/tickets/<ticket-uuid>/override \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "suggested_response": "Thanks for reaching out — I have escalated this to our integrations team and will follow up within one business day.",
+    "category": "general",
+    "note": "Out of scope custom integration request"
+  }' | jq
+```
+
+Sets `status` to `human_resolved` with the reviewer-provided reply.
 
 ### List tickets
 
 ```bash
 curl -s http://localhost:8000/tickets | jq
 ```
+
+> If you previously ran an older schema, recreate volumes once so Postgres enums
+> match (`docker compose down -v && docker compose up --build`).
 
 ## Configuration
 

@@ -34,7 +34,9 @@ app = FastAPI(
     title="CloudNova Ticket Triage",
     description=(
         "Fully self-hosted RAG ticket triage using local Ollama "
-        "(llama3.1:8b + nomic-embed-text). No external API keys."
+        "(llama3.1:8b + nomic-embed-text). Classifies tickets, drafts "
+        "replies when confidence is high, and escalates to humans otherwise. "
+        "No external API keys."
     ),
     version="0.3.0",
     lifespan=lifespan,

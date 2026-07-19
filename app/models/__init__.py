@@ -3,6 +3,7 @@ from app.models.schemas import (
     HealthResponse,
     TicketCreate,
     TicketListResponse,
+    TicketOverrideRequest,
     TicketResponse,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "HealthResponse",
     "TicketCreate",
     "TicketListResponse",
+    "TicketOverrideRequest",
     "TicketResponse",
 ]
