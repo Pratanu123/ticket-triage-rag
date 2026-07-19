@@ -35,7 +35,7 @@ flowchart LR
   Respond -->|confidence high| Ollama
   API --> PG["PostgreSQL"]
   Human["Human reviewer"] -->|POST /tickets/id/override| API
-
+```
 
 | Service       | Role                                                      |
 |---------------|-----------------------------------------------------------|
