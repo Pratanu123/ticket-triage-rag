@@ -3,10 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import health, tickets
+from app.api import debug, health, tickets
 from app.config import get_settings
 from app.database import init_db
-from app.rag.embeddings import index_knowledge_base, wait_for_chroma
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,30 +19,32 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     if not settings.openai_api_key:
         logger.warning(
-            "OPENAI_API_KEY is empty — /health will work, but triage will fail"
+            "OPENAI_API_KEY is empty — local Chroma embeddings are used for "
+            "retrieval; LLM triage will fail until a key is set"
         )
 
     logger.info("Initializing database schema…")
     await init_db()
-
-    logger.info("Waiting for ChromaDB…")
-    await wait_for_chroma(settings)
-
-    logger.info("Indexing knowledge base into ChromaDB…")
-    indexed = index_knowledge_base(settings)
-    logger.info("Startup complete (chunks indexed this boot: %s)", indexed)
+    # Knowledge-base indexing is handled by the one-shot `embed` Compose service
+    # (service_completed_successfully) before this API starts.
+    logger.info(
+        "API ready (seed_data=%s, collection=%s)",
+        settings.seed_data_path,
+        settings.chroma_collection,
+    )
     yield
 
 
 app = FastAPI(
-    title="CloudLedger Ticket Triage",
+    title="CloudNova Ticket Triage",
     description=(
-        "RAG-powered support ticket classification with confidence-based "
-        "human escalation."
+        "RAG-powered support ticket triage. Stage 2: knowledge-base embedding "
+        "and retrieval (use POST /debug/retrieve to inspect chunks)."
     ),
-    version="1.0.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 app.include_router(health.router)
+app.include_router(debug.router)
 app.include_router(tickets.router)

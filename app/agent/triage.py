@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import Settings, get_settings
 from app.models.db import TicketCategory, TicketStatus
-from app.rag.retriever import format_context, retrieve_context
+from app.rag.retrieve import format_context, retrieve as retrieve_context
 
 logger = logging.getLogger(__name__)
 

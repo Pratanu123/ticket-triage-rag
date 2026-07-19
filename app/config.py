@@ -1,6 +1,12 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Default seed path works both in Docker (/app/...) and local checkout
+_DEFAULT_SEED = str(
+    Path(__file__).resolve().parent / "rag" / "seed_data"
+)
 
 
 class Settings(BaseSettings):
@@ -19,7 +25,10 @@ class Settings(BaseSettings):
     chroma_port: int = 8000
     chroma_collection: str = "support_kb"
 
-    knowledge_base_path: str = "/app/knowledge_base"
+    seed_data_path: str = _DEFAULT_SEED
+    # Legacy alias — prefer seed_data_path
+    knowledge_base_path: str = _DEFAULT_SEED
+
     confidence_threshold: float = 0.7
     retrieval_top_k: int = 4
 

@@ -1,4 +1,4 @@
-from app.rag.embeddings import index_knowledge_base
-from app.rag.retriever import retrieve_context
+from app.rag.embed import run_embedding_pipeline
+from app.rag.retrieve import RetrievedChunk, retrieve
 
-__all__ = ["index_knowledge_base", "retrieve_context"]
+__all__ = ["RetrievedChunk", "retrieve", "run_embedding_pipeline"]

@@ -1,12 +1,15 @@
-# CloudLedger Ticket Triage (RAG)
+# CloudNova Ticket Triage (RAG)
 
 A local demo of a support-ticket triage system that uses **Retrieval-Augmented Generation (RAG)** to classify incoming tickets, draft answers from a product knowledge base, and escalate to a human when confidence is low.
 
 Built as a portfolio project: small surface area, clear structure, fully runnable with Docker Compose.
 
+> **Current stage: 2 — knowledge-base seeding + retrieval.**  
+> Use `POST /debug/retrieve` to inspect chunk quality before the LLM classification stage is wired further.
+
 ## Problem statement
 
-Support teams drown in repetitive questions that already exist in docs (billing, login, API errors, refunds). A plain LLM call can invent answers or sound confident when it should escalate. This project shows a safer pattern:
+Support teams drown in repetitive questions that already exist in docs (billing, login, API errors, FAQs). A plain LLM call can invent answers or sound confident when it should escalate. This project shows a safer pattern:
 
 1. Retrieve relevant doc chunks from a vector store
 2. Ask the model to classify + score confidence against that context
@@ -17,30 +20,31 @@ Support teams drown in repetitive questions that already exist in docs (billing,
 
 ```mermaid
 flowchart LR
-  Client["Client / curl"] -->|POST /tickets| API["FastAPI"]
-  API --> Agent["Triage agent"]
-  Agent -->|embed query| Chroma["ChromaDB"]
-  KB["Markdown knowledge base"] -->|startup index| Chroma
-  Agent -->|classify + draft| LLM["OpenAI via LangChain"]
-  Agent -->|persist ticket| PG["PostgreSQL"]
-  API -->|GET /tickets| PG
+  Client["Client / curl"] -->|POST /debug/retrieve| API["FastAPI"]
+  EmbedJob["embed service\n(one-shot)"] -->|chunk + upsert| Chroma["ChromaDB"]
+  Seed["app/rag/seed_data/*.md"] --> EmbedJob
+  API -->|query top-k| Chroma
+  API --> PG["PostgreSQL"]
 ```
 
-| Service   | Role                                      |
-|-----------|-------------------------------------------|
-| `api`     | FastAPI app: triage, health, ticket CRUD  |
-| `chromadb`| Local vector store (persisted volume)     |
-| `postgres`| Tickets, status, reasoning, responses     |
+| Service    | Role                                                    |
+|------------|---------------------------------------------------------|
+| `chromadb` | Local vector store (persisted volume)                   |
+| `embed`    | One-shot job: chunk + embed seed docs (idempotent)      |
+| `postgres` | Ticket persistence (used by later stages /health)       |
+| `api`      | FastAPI — starts only after `embed` completes           |
 
 ### Project layout
 
 ```
 app/
-  api/       # HTTP routes (/health, /tickets)
-  rag/       # embedding + retrieval
-  agent/     # classification + response generation
-  models/    # SQLAlchemy + Pydantic schemas
-knowledge_base/   # 15 CloudLedger FAQ/docs (seeded)
+  api/                 # /health, /debug/retrieve, /tickets
+  rag/
+    seed_data/         # 12 CloudNova support markdown docs
+    embed.py           # chunk + embed + upsert into ChromaDB
+    retrieve.py        # top-k similarity search
+  agent/               # (later stage) classification + drafting
+  models/              # SQLAlchemy + Pydantic schemas
 ```
 
 ## Setup
@@ -49,19 +53,26 @@ Prerequisites: Docker + Docker Compose.
 
 ```bash
 cp .env.example .env
-# edit .env and set OPENAI_API_KEY=sk-...
+# optional for stage 2: set OPENAI_API_KEY=sk-...
+# without a key, embed falls back to Chroma's local DefaultEmbeddingFunction
 
 docker compose up --build
 ```
 
-That is the full setup. On boot the API:
+Boot order:
 
-1. Creates Postgres tables
-2. Waits for ChromaDB
-3. Embeds and indexes all `knowledge_base/*.md` files (skipped if the collection already has documents)
+1. `postgres` + `chromadb` become healthy
+2. `embed` loads `app/rag/seed_data/*.md`, chunks by heading, upserts into Chroma
+3. `api` starts and serves traffic
+
+Re-index after editing seed docs:
+
+```bash
+docker compose run --rm embed python -m app.rag.embed --force
+```
 
 API base URL: `http://localhost:8000`  
-Interactive docs: `http://localhost:8000/docs`
+Docs: `http://localhost:8000/docs`
 
 ## Example requests
 
@@ -71,72 +82,54 @@ Interactive docs: `http://localhost:8000/docs`
 curl -s http://localhost:8000/health | jq
 ```
 
-### High-confidence ticket (should auto-resolve)
+### Debug retrieval (stage 2)
 
 ```bash
-curl -s -X POST http://localhost:8000/tickets \
+curl -s -X POST http://localhost:8000/debug/retrieve \
   -H 'Content-Type: application/json' \
-  -d '{
-    "subject": "Forgot my password",
-    "body": "I cannot log in to CloudLedger and need to reset my password. How do I do that?"
-  }' | jq
+  -d '{"query": "how do I reset my 2FA", "k": 4}' | jq
 ```
 
-Expected shape: `status` ≈ `auto_resolved`, a `category` like `login`, a `confidence` above the threshold (default `0.7`), and a `suggested_response` grounded in the docs.
+Expected: top chunks from `login-2fa.md` (category `login`) with the highest scores.
 
-### Low-confidence / out-of-scope ticket (should escalate)
+### Other useful probes
 
 ```bash
-curl -s -X POST http://localhost:8000/tickets \
+curl -s -X POST http://localhost:8000/debug/retrieve \
   -H 'Content-Type: application/json' \
-  -d '{
-    "subject": "Custom ERP connector",
-    "body": "Can you build a real-time bi-directional sync with our on-prem SAP instance and guarantee 50ms latency?"
-  }' | jq
+  -d '{"query": "payment failed retry card"}' | jq
+
+curl -s -X POST http://localhost:8000/debug/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "HTTP 429 rate limit"}' | jq
 ```
 
-Expected: `status` = `needs_human_review`, little or no `suggested_response`.
+## Seed data categories
 
-### List and fetch tickets
+| Category | Files |
+|----------|-------|
+| Billing & payments | `billing-failed-charges.md`, `billing-refunds.md`, `billing-plan-changes.md` |
+| Login & account | `login-password-reset.md`, `login-2fa.md`, `login-locked-accounts.md` |
+| API errors | `api-rate-limits.md`, `api-auth-errors.md`, `api-status-codes.md` |
+| General FAQs | `faq-getting-started.md`, `faq-features.md`, `faq-support-and-data.md` |
 
-```bash
-curl -s http://localhost:8000/tickets | jq
-curl -s http://localhost:8000/tickets/<ticket-uuid> | jq
-```
-
-## Configuration
-
-| Variable               | Default                 | Purpose                          |
-|------------------------|-------------------------|----------------------------------|
-| `OPENAI_API_KEY`       | _(required)_            | Embeddings + triage LLM          |
-| `LLM_PROVIDER`         | `openai`                | Provider switch (OpenAI today)   |
-| `LLM_MODEL`            | `gpt-4o-mini`           | Chat model                       |
-| `EMBEDDING_MODEL`      | `text-embedding-3-small`| Embedding model                  |
-| `CONFIDENCE_THRESHOLD` | `0.7`                   | Auto-resolve cutoff              |
-| `POSTGRES_*`           | `triage` / `triage`     | Database credentials             |
+Each chunk stores metadata: `source` (filename), `category`, `chunk_index`.  
+IDs are `{source}::{chunk_index}` so re-running embed **upserts** instead of duplicating.
 
 ## Design decisions
 
+### Why a separate `embed` Compose service?
+
+Indexing is a batch job, not request latency. A one-shot service with
+`condition: service_completed_successfully` keeps the API boot simple and makes
+re-indexing an explicit `docker compose run` command.
+
 ### Why RAG instead of a plain LLM call?
 
-A plain prompt has no product ground truth. Models fill gaps with plausible fiction (wrong refund windows, invented API error codes). RAG injects the actual docs into the prompt so answers are attributable to retrieved chunks, which are also stored on the ticket as `retrieved_context` for auditability.
+A plain prompt has no product ground truth. RAG injects real docs so answers are
+attributable to retrieved chunks (inspectable via `/debug/retrieve`).
 
-### Why confidence-based escalation?
+### Why confidence-based escalation? (next stage)
 
-Automation that is wrong is worse than no automation. The agent returns an explicit confidence score. Below `CONFIDENCE_THRESHOLD`, the system refuses to guess: status becomes `needs_human_review` and any drafted reply is discarded. That keeps the demo honest about when retrieval is weak or the question is out of scope.
-
-### Why this stack?
-
-- **FastAPI** — clear typed API surface for a portfolio demo
-- **ChromaDB** — zero-ops local vector store with a Docker volume
-- **PostgreSQL** — durable ticket history (not just chat logs)
-- **LangChain + OpenAI** — thin orchestration; `LLM_PROVIDER` is isolated so another provider can be plugged in later without rewriting routes
-
-## Knowledge base
-
-Fifteen markdown docs under `knowledge_base/` cover a fictional SaaS called **CloudLedger** (billing, login/SSO, API auth & errors, refunds, expenses, integrations, security, FAQ). Edit or add `.md` files and restart the API with a fresh Chroma volume to re-index:
-
-```bash
-docker compose down -v
-docker compose up --build
-```
+Automation that is wrong is worse than no automation. Stage 3 will refuse to
+guess below a confidence threshold and mark tickets `needs_human_review`.
