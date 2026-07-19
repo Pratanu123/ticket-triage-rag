@@ -1,158 +1,38 @@
-# CloudNova Ticket Triage (RAG)
+# Ticket Triage RAG
 
-A **fully self-hosted** support-ticket triage demo that uses RAG to classify
-incoming tickets, draft answers from a product knowledge base, and escalate to a
-human when confidence is low.
-
-**No external API keys.** Chat and embeddings run on a local [Ollama](https://ollama.com)
-instance inside Docker Compose.
+A self-hosted support ticket triage system using retrieval-augmented generation and confidence-based human escalation.
 
 ## Problem statement
 
-Support teams drown in repetitive questions that already exist in docs (billing,
-login, API errors, FAQs). A plain LLM call can invent answers or sound confident
-when it should escalate. This project shows a safer pattern:
-
-1. Retrieve relevant doc chunks from a local vector store
-2. Ask a local model to classify + score confidence against that context
-3. Auto-draft a reply only when confidence clears a threshold
-4. Otherwise mark the ticket `needs_human_review`
-5. A human can later approve/edit via `POST /tickets/{id}/override`
+Most support volume is repetitive questions already answered in product docs—password resets, failed charges, API 429s. Auto-replying with a plain LLM is risky: the model can invent policy details or sound sure when the docs don’t cover the case. Always routing to a human is safer but wastes agent time on tickets the docs already solve. This project sits in the middle: retrieve relevant docs, classify with a confidence score, draft a reply only when that score clears a threshold, and escalate everything else for human review.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  Client["Client / curl"] -->|POST /tickets| API["FastAPI"]
-  Pull["ollama-pull\n(one-shot)"] -->|pull models| Ollama["Ollama"]
-  EmbedJob["embed service\n(one-shot)"] -->|nomic-embed-text| Ollama
-  EmbedJob -->|upsert chunks| Chroma["ChromaDB"]
-  Seed["app/rag/seed_data/*.md"] --> EmbedJob
-  API -->|retrieve| Chroma
-  API -->|classify JSON| Classify["agent/classify.py"]
-  Classify --> Ollama
-  API -->|draft or escalate| Respond["agent/respond.py"]
-  Respond -->|confidence high| Ollama
-  API --> PG["PostgreSQL"]
-  Human["Human reviewer"] -->|POST /tickets/id/override| API
+  Ticket["Incoming ticket"] --> Retrieve["Retrieve chunks\nChromaDB"]
+  Retrieve --> Classify["Classify\nOllama llama3.1:8b"]
+  Classify --> Gate{"confidence >= 0.7?"}
+  Gate -->|yes| Auto["Draft response\n+ auto_resolved"]
+  Gate -->|no| Human["needs_human_review\n(+ optional override)"]
+  Auto --> PG["Postgres"]
+  Human --> PG
 ```
 
-| Service       | Role                                                      |
-|---------------|-----------------------------------------------------------|
-| `ollama`      | Local LLM + embedding server (`:11434`, named volume)     |
-| `ollama-pull` | First-run `ollama pull` for chat + embed models           |
-| `chromadb`    | Vector store (persisted volume)                           |
-| `embed`       | Chunk seed docs and index them via `nomic-embed-text`     |
-| `postgres`    | Ticket persistence                                        |
-| `api`         | FastAPI — starts only after models are pulled + indexed   |
-
-### Models
-
-| Role        | Model              | Env var              |
-|-------------|--------------------|----------------------|
-| Chat / triage | `llama3.1:8b`    | `OLLAMA_MODEL`       |
-| Embeddings  | `nomic-embed-text` | `OLLAMA_EMBED_MODEL` |
-
-**Why `llama3.1:8b` (not a 3B-class model)?**  
-Triage needs reliable **structured JSON** (category + confidence + optional
-draft). Smaller 3B models are faster but miss fields, invent categories, or
-break JSON more often. 8B is a deliberate reliability tradeoff for this demo.
-
-### Project layout
-
-```
-app/
-  api/                 # /health, /debug/retrieve, /tickets (+ override)
-  rag/
-    seed_data/         # 12 CloudNova support markdown docs
-    embed.py           # chunk + Ollama embed + Chroma upsert
-    retrieve.py        # top-k similarity search
-  agent/
-    classify.py        # RAG classify → category + confidence + reasoning
-    respond.py         # draft reply if confident, else escalate
-    llm.py             # shared ChatOllama client
-  models/              # SQLAlchemy + Pydantic schemas
-tests/                 # pytest suite (retrieval, classify, escalate, API)
-scripts/
-  pull_ollama_models.sh
-```
-
-## Setup
-
-Prerequisites: Docker + Docker Compose. **No API keys.**
-
-> First boot downloads models into the `ollama_data` volume (~5GB for
-> `llama3.1:8b` plus ~270MB for `nomic-embed-text`). Later starts reuse the volume.
+## Quickstart
 
 ```bash
+git clone https://github.com/Pratanu123/ticket-triage-rag.git
+cd ticket-triage-rag
 cp .env.example .env
 docker compose up --build
 ```
 
-Boot order:
+No API keys. On first run the `ollama-pull` service downloads `llama3.1:8b` and `nomic-embed-text` into a named volume (~5–10 minutes depending on network). Later starts reuse that volume. API listens on `http://localhost:8000`.
 
-1. `postgres`, `chromadb`, and `ollama` start
-2. `ollama-pull` runs `ollama pull llama3.1:8b` and `ollama pull nomic-embed-text`
-3. `embed` indexes `app/rag/seed_data/*.md` into Chroma via Ollama embeddings
-4. `api` serves traffic
+## Example usage
 
-Re-index after editing seed docs:
-
-```bash
-docker compose run --rm embed python -m app.rag.embed --force
-```
-
-Re-pull / swap models (example: change `OLLAMA_MODEL` in `.env` first):
-
-```bash
-docker compose run --rm ollama-pull
-```
-
-API: `http://localhost:8000` · Docs: `http://localhost:8000/docs` · Ollama: `http://localhost:11434`
-
-## Running tests
-
-Tests run **inside the same Compose network** as the app (real Postgres, ChromaDB,
-and local Ollama). Start the stack once, then:
-
-```bash
-docker compose run --rm api pytest -v
-```
-
-Equivalent one-shot service (same command, `test` profile):
-
-```bash
-docker compose --profile test run --rm test
-```
-
-Notes:
-
-- Classification tests (`@pytest.mark.llm`) hit the real `llama3.1:8b` model —
-  keep that set small on purpose.
-- Retrieval tests hit real `nomic-embed-text` + Chroma.
-- API/escalation unit paths stub LLM calls where the behavior under test is
-  routing/persistence, not model quality.
-- First run needs models pulled and the KB indexed (`docker compose up` once).
-
-## Example requests
-
-### Health
-
-```bash
-curl -s http://localhost:8000/health | jq
-```
-
-### Debug retrieval
-
-```bash
-curl -s -X POST http://localhost:8000/debug/retrieve \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "how do I reset my 2FA", "k": 4}' | jq
-```
-
-Expect top chunks from `login-2fa.md` (category `login`).
-
-### Create a ticket — high confidence (expect `auto_resolved`)
+### Auto-resolved ticket (clear login / 2FA question)
 
 ```bash
 curl -s -X POST http://localhost:8000/tickets \
@@ -160,13 +40,36 @@ curl -s -X POST http://localhost:8000/tickets \
   -d '{
     "subject": "I cannot log in",
     "body": "I cannot log in, 2FA is not working after I got a new phone. How do I reset it?"
-  }' | jq
+  }'
 ```
 
-Expect: `category` = `login`, `confidence` ≥ `0.7`, `status` = `auto_resolved`,
-a `suggested_response` citing `login-2fa.md`, and `retrieved_chunks` from login docs.
+Example response:
 
-### Create a ticket — low confidence (expect escalation)
+```json
+{
+  "id": "3f2a9c1e-8b4d-4e6a-9c21-7a1d0e5b8f33",
+  "subject": "I cannot log in",
+  "body": "I cannot log in, 2FA is not working after I got a new phone. How do I reset it?",
+  "category": "login",
+  "confidence": 0.91,
+  "status": "auto_resolved",
+  "suggested_response": "Sorry about the lockout. If you still have a backup code, use it on the login screen (Use a backup code), then go to Settings → Security → Two-factor authentication, disable 2FA, and set it up again on your new phone. According to login-2fa.md, a workspace admin can also reset your 2FA from Settings → Team if you have no backup codes.",
+  "reasoning": "The ticket clearly describes a 2FA recovery scenario after a device change, which matches the login-2fa knowledge base article.",
+  "retrieved_chunks": [
+    {
+      "content": "## Reset or recover 2FA\nIf you lost your authenticator device:\n1. Use a backup code on the login screen...",
+      "source": "login-2fa.md",
+      "category": "login",
+      "chunk_index": 1,
+      "score": 0.86
+    }
+  ],
+  "created_at": "2026-07-19T20:15:01.120Z",
+  "updated_at": "2026-07-19T20:15:01.120Z"
+}
+```
+
+### Escalated ticket (vague / out of scope)
 
 ```bash
 curl -s -X POST http://localhost:8000/tickets \
@@ -174,71 +77,117 @@ curl -s -X POST http://localhost:8000/tickets \
   -d '{
     "subject": "Weird issue",
     "body": "Something feels off with my workspace but I am not sure what. Also can you build a custom SAP connector with 50ms latency?"
-  }' | jq
+  }'
 ```
 
-Expect: `status` = `needs_human_review` and `suggested_response` = `null`
-(no guessing).
+Example response:
 
-### Fetch full ticket detail
-
-```bash
-curl -s http://localhost:8000/tickets/<ticket-uuid> | jq
+```json
+{
+  "id": "a91e0b44-2c7f-4d18-8e55-0f3c6b9a1d20",
+  "subject": "Weird issue",
+  "body": "Something feels off with my workspace but I am not sure what. Also can you build a custom SAP connector with 50ms latency?",
+  "category": "general",
+  "confidence": 0.28,
+  "status": "needs_human_review",
+  "suggested_response": null,
+  "reasoning": "The request mixes an unspecified workspace issue with a custom ERP integration that is not covered by the knowledge base. Confidence is low; escalating instead of guessing.",
+  "retrieved_chunks": [
+    {
+      "content": "## Contact support\n- Starter/Pro: support@cloudnova.example...",
+      "source": "faq-support-and-data.md",
+      "category": "faq",
+      "chunk_index": 0,
+      "score": 0.41
+    }
+  ],
+  "created_at": "2026-07-19T20:16:12.004Z",
+  "updated_at": "2026-07-19T20:16:12.004Z"
+}
 ```
-
-Returns subject/body, category, confidence, status, draft response, reasoning,
-and the knowledge-base chunks used.
 
 ### Human override (escalation is not a dead end)
 
 ```bash
-curl -s -X POST http://localhost:8000/tickets/<ticket-uuid>/override \
+curl -s -X POST http://localhost:8000/tickets/a91e0b44-2c7f-4d18-8e55-0f3c6b9a1d20/override \
   -H 'Content-Type: application/json' \
   -d '{
-    "suggested_response": "Thanks for reaching out — I have escalated this to our integrations team and will follow up within one business day.",
+    "suggested_response": "Thanks for reaching out. Custom SAP sync is outside self-serve support — I have routed this to our integrations team, who will follow up within one business day. If you can share any concrete error messages about the workspace issue separately, that helps us triage faster.",
     "category": "general",
-    "note": "Out of scope custom integration request"
-  }' | jq
+    "note": "Out-of-scope integration; handed to integrations queue"
+  }'
 ```
 
-Sets `status` to `human_resolved` with the reviewer-provided reply.
+Example response:
 
-### List tickets
-
-```bash
-curl -s http://localhost:8000/tickets | jq
+```json
+{
+  "id": "a91e0b44-2c7f-4d18-8e55-0f3c6b9a1d20",
+  "subject": "Weird issue",
+  "body": "Something feels off with my workspace but I am not sure what. Also can you build a custom SAP connector with 50ms latency?",
+  "category": "general",
+  "confidence": 0.28,
+  "status": "human_resolved",
+  "suggested_response": "Thanks for reaching out. Custom SAP sync is outside self-serve support — I have routed this to our integrations team, who will follow up within one business day. If you can share any concrete error messages about the workspace issue separately, that helps us triage faster.",
+  "reasoning": "The request mixes an unspecified workspace issue with a custom ERP integration that is not covered by the knowledge base. Confidence is low; escalating instead of guessing.\n\n[human override] Out-of-scope integration; handed to integrations queue",
+  "retrieved_chunks": [
+    {
+      "content": "## Contact support\n- Starter/Pro: support@cloudnova.example...",
+      "source": "faq-support-and-data.md",
+      "category": "faq",
+      "chunk_index": 0,
+      "score": 0.41
+    }
+  ],
+  "created_at": "2026-07-19T20:16:12.004Z",
+  "updated_at": "2026-07-19T20:17:44.551Z"
+}
 ```
-
-> If you previously ran an older schema, recreate volumes once so Postgres enums
-> match (`docker compose down -v && docker compose up --build`).
-
-## Configuration
-
-| Variable               | Default             | Purpose                         |
-|------------------------|---------------------|---------------------------------|
-| `OLLAMA_MODEL`         | `llama3.1:8b`       | Chat / classification model     |
-| `OLLAMA_EMBED_MODEL`   | `nomic-embed-text`  | Embedding model for Chroma      |
-| `CONFIDENCE_THRESHOLD` | `0.7`               | Auto-resolve cutoff             |
-| `POSTGRES_*`           | `triage`            | Database credentials            |
-
-There is **no** `OPENAI_API_KEY` (or any other vendor key) in this project.
 
 ## Design decisions
 
-### Why RAG instead of a plain LLM call?
+### Why RAG instead of a plain LLM call
 
-A plain prompt has no product ground truth. RAG injects real docs so answers are
-attributable to retrieved chunks (inspectable via `/debug/retrieve`).
+A prompt-only model has no product ground truth. Asked about refund windows or API error codes, it will often invent plausible answers. RAG pulls the actual markdown docs into the prompt and stores the retrieved chunks on the ticket, so a reviewer can see what the model saw. That does not eliminate hallucination, but it ties answers to specific sources (`login-2fa.md`, `api-rate-limits.md`) instead of model memory.
 
-### Why confidence-based escalation?
+### Why confidence-based escalation
 
-Wrong automation is worse than no automation. Below `CONFIDENCE_THRESHOLD` the
-system refuses to guess: status becomes `needs_human_review` and drafted replies
-are discarded.
+Wrong automation is worse than no automation. If the system always auto-replies, ambiguous tickets get confident nonsense. If it never auto-replies, the demo is just a search box. The classifier returns an explicit confidence score; below the threshold we set `needs_human_review` and skip drafting entirely. `POST /tickets/{id}/override` exists so escalation is a handoff, not a dead end.
 
-### Why fully local Ollama?
+### Why local Ollama instead of a hosted API
 
-Keeps the portfolio demo runnable with `docker compose up` and nothing else —
-no signup, no billing, no leaked keys in `.env`. Chat uses LangChain
-`ChatOllama` at `http://ollama:11434`; embeddings use `OllamaEmbeddings` with
-`nomic-embed-text`.
+Anyone cloning the repo can run `docker compose up` with no signup, billing, or leaked keys in `.env`. Chat uses `llama3.1:8b` and embeddings use `nomic-embed-text`, both served from the `ollama` Compose service. The 8B chat model was chosen over 3B-class options because triage needs reliable structured JSON (category + confidence); smaller models break that format more often. Trade-off: first boot downloads ~5GB and inference is slower than a hosted API.
+
+### Why this chunking / retrieval strategy
+
+Seed docs are split primarily on `##` / `###` headings, then hard-capped around ~2000 characters so oversized sections don’t become one embedding. That keeps chunks aligned with how the docs were written, which works well for this small FAQ corpus. Trade-offs: heading-based splits can still mix unrelated bullets under one section, and we only take top-k=4 by cosine similarity—no reranker, no hybrid BM25. For 12 short markdown files that is enough; for a large messy wiki it would not be.
+
+### Why a confidence threshold of 0.7
+
+`CONFIDENCE_THRESHOLD` defaults to `0.7`. That is a tunable knob, not a calibrated probability. The model’s score is self-reported, so treating 0.7 as “70% accurate in production” would be wrong. Empirically, clear doc-backed tickets (password reset, 2FA, rate limits) land above it, and vague or out-of-scope tickets land below. In a real deployment you would measure precision/recall on labeled tickets and move the threshold—or replace the scalar with a calibrated model.
+
+## What I'd do differently at scale
+
+- Replace local ChromaDB with a managed vector store (or pgvector in the same Postgres) once the corpus and QPS grow past a single-node demo.
+- Cache embeddings and frequent retrieval results for repeated subjects (“reset password”) to cut Ollama load.
+- Log human overrides as labeled feedback and periodically retune the threshold (or train a small classifier on override outcomes).
+- Add tracing around retrieve → classify → respond (latency, token counts, parse retries) so failures are debuggable in production, not just via `docker compose logs`.
+
+## Tech stack
+
+- **API:** Python 3.11, FastAPI, Pydantic, SQLAlchemy (async)
+- **LLM / embeddings:** Ollama (`llama3.1:8b`, `nomic-embed-text`) via LangChain
+- **Vector store:** ChromaDB (Docker volume)
+- **Database:** PostgreSQL 16
+- **Orchestration:** Docker Compose
+- **Tests:** pytest (run inside Compose against real services)
+
+## Running tests
+
+With the stack up (or after dependencies are healthy):
+
+```bash
+docker compose run --rm api pytest -v
+```
+
+Classification tests hit the real local Ollama model on purpose; the set is kept small so the suite stays practical.
